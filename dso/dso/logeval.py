@@ -5,7 +5,6 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-from pkg_resources import resource_filename
 import re
 import glob
 import os

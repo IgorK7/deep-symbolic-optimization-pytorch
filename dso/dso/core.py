@@ -29,6 +29,13 @@ from dso.policy.policy import make_policy
 from dso.policy_optimizer import make_policy_optimizer
 
 
+def _worker_init(config_task, complexity, const_optimizer, const_params):
+    """Pool worker initializer: sets task, complexity, and const optimizer."""
+    set_task(config_task)
+    Program.set_complexity(complexity)
+    Program.set_const_optimizer(const_optimizer, **const_params)
+
+
 class DeepSymbolicOptimizer:
     """
     Deep symbolic optimization model. Includes model hyperparameters and
@@ -65,9 +72,14 @@ class DeepSymbolicOptimizer:
 
         # Resolve device
         device_name = self.config_experiment.get("device", "cpu")
-        if device_name != "cpu" and not torch.cuda.is_available():
+        if device_name == "mps" and not torch.backends.mps.is_available():
             print(
-                f"WARNING: Requested device '{device_name}' but CUDA is unavailable. Falling back to CPU."
+                f"WARNING: Requested device 'mps' but MPS is unavailable. Falling back to CPU."
+            )
+            device_name = "cpu"
+        elif device_name == "cuda" and not torch.cuda.is_available():
+            print(
+                f"WARNING: Requested device 'cuda' but CUDA is unavailable. Falling back to CPU."
             )
             device_name = "cpu"
         self.device = torch.device(device_name)
@@ -263,7 +275,9 @@ class DeepSymbolicOptimizer:
                 n_cores_batch = cpu_count()
             if n_cores_batch > 1:
                 pool = Pool(
-                    n_cores_batch, initializer=set_task, initargs=(self.config_task,)
+                    n_cores_batch,
+                    initializer=_worker_init,
+                    initargs=(self.config_task, complexity, const_optimizer, const_params),
                 )
 
         # Set the Task for the parent process

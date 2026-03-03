@@ -371,7 +371,7 @@ class ProgramQueueMixin:
         priors = np.concatenate(priors, axis=0)
         lengths = np.array([s.lengths for s in samples], dtype=np.int32)
         rewards = np.array([s.rewards for s in samples], dtype=np.float32)
-        on_policy = np.array([s.on_policy for s in samples], dtype=np.bool)
+        on_policy = np.array([s.on_policy for s in samples], dtype=np.bool_)
         batch = Batch(
             actions=actions,
             obs=obs,

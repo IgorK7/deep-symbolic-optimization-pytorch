@@ -1,7 +1,9 @@
 """Utility functions for control task."""
 
 import os
-from pkg_resources import resource_filename
+import importlib.resources as _pkg_ir
+def resource_filename(package, resource):
+    return str(_pkg_ir.files(package).joinpath(resource))
 
 from datetime import datetime
 from glob import glob

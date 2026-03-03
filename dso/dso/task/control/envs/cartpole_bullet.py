@@ -21,7 +21,7 @@ import subprocess
 import pybullet as p2
 import pybullet_data
 import pybullet_utils.bullet_client as bc
-from pkg_resources import parse_version
+from packaging.version import parse as parse_version
 
 logger = logging.getLogger(__name__)
 

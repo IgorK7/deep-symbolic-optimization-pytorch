@@ -3,7 +3,11 @@
 import os
 import ast
 import itertools
-from pkg_resources import resource_filename
+import importlib.resources as _pkg_ir
+
+def resource_filename(package, resource):
+    """Replacement for pkg_resources.resource_filename using importlib.resources."""
+    return str(_pkg_ir.files(package).joinpath(resource))
 import zlib
 
 import click

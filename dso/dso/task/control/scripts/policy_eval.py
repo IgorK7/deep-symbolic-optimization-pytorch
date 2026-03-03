@@ -22,7 +22,9 @@ import subprocess
 from datetime import datetime
 import time
 
-from pkg_resources import resource_filename
+import importlib.resources as _pkg_ir
+def resource_filename(package, resource):
+    return str(_pkg_ir.files(package).joinpath(resource))
 
 import dso.task.control.utils as U
 from dso.program import Program, from_str_tokens

@@ -518,7 +518,7 @@ class StatsLogger:
             for token in program.traversal:
                 token_counter[token.name] += 1
         stats = np.array(
-            [[token_counter[token] for token in token_counter]], dtype=np.int
+            [[token_counter[token] for token in token_counter]], dtype=np.int_
         )
         np.savetxt(self.buffer_token_stats, stats, fmt="%i", delimiter=",")
 
