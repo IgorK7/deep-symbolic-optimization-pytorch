@@ -40,6 +40,16 @@ def sigmoid(x1):
     return 1 / (1 + np.exp(-x1))
 
 
+def relu(x1):
+    """Rectified linear unit: max(x, 0)."""
+    return np.maximum(x1, 0.0)
+
+
+def indicator(x1):
+    """Indicator (Heaviside step) function: 1{x > 0}."""
+    return np.where(x1 > 0, 1.0, 0.0)
+
+
 def harmonic(x1):
     if all(val.is_integer() for val in x1):
         return np.array(
@@ -78,6 +88,9 @@ unprotected_ops = [
     Token(n4, "n4", arity=1, complexity=3),
     Token(sigmoid, "sigmoid", arity=1, complexity=4),
     Token(harmonic, "harmonic", arity=1, complexity=4),
+    # Piecewise / threshold operators
+    Token(relu, "relu", arity=1, complexity=2),
+    Token(indicator, "indicator", arity=1, complexity=2),
 ]
 
 
@@ -135,6 +148,17 @@ def protected_sigmoid(x1):
     return 1 / (1 + protected_expneg(x1))
 
 
+def protected_relu(x1):
+    """Protected ReLU: clamp large inputs to prevent downstream overflow."""
+    with np.errstate(over="ignore"):
+        return np.where(np.abs(x1) < 1e6, np.maximum(x1, 0.0), 0.0)
+
+
+def protected_indicator(x1):
+    """Protected indicator: numerically safe (output is always 0 or 1)."""
+    return np.where(x1 > 0, 1.0, 0.0)
+
+
 # Annotate protected ops
 protected_ops = [
     # Protected binary operators
@@ -152,6 +176,9 @@ protected_ops = [
     Token(protected_n3, "n3", arity=1, complexity=3),
     Token(protected_n4, "n4", arity=1, complexity=3),
     Token(protected_sigmoid, "sigmoid", arity=1, complexity=4),
+    # Protected piecewise / threshold operators
+    Token(protected_relu, "relu", arity=1, complexity=2),
+    Token(protected_indicator, "indicator", arity=1, complexity=2),
 ]
 
 # Add unprotected ops to function map
