@@ -1,9 +1,16 @@
 """Constant optimizer used for deep symbolic optimization."""
 
+import os
+import time
 from functools import partial
 
 import numpy as np
 from scipy.optimize import minimize
+
+# Optional scipy iteration logging. Enabled by setting DSO_SCIPY_LOG env var
+# to a file path. Each worker appends one line per scipy.minimize call.
+# Format: pid,n_const,nfev,nit,status,wall_sec,fun
+_SCIPY_LOG_PATH = os.environ.get("DSO_SCIPY_LOG")
 
 
 def make_const_optimizer(name, **kwargs):
@@ -65,7 +72,22 @@ class ScipyMinimize(ConstOptimizer):
         super(ScipyMinimize, self).__init__(**kwargs)
 
     def __call__(self, f, x0):
+        t0 = time.time() if _SCIPY_LOG_PATH else None
         with np.errstate(divide="ignore"):
             opt_result = partial(minimize, **self.kwargs)(f, x0)
+        if _SCIPY_LOG_PATH is not None:
+            wall = time.time() - t0
+            line = "{},{},{},{},{},{:.6f},{:.6g}\n".format(
+                os.getpid(),
+                len(x0),
+                int(opt_result.get("nfev", -1)),
+                int(opt_result.get("nit", -1)),
+                int(opt_result.get("status", -1)),
+                wall,
+                float(opt_result.get("fun", float("nan"))),
+            )
+            # POSIX append is atomic for small writes; safe across pool workers.
+            with open(_SCIPY_LOG_PATH, "a") as _f:
+                _f.write(line)
         x = opt_result["x"]
         return x
