@@ -22,3 +22,24 @@ dep-repos/
 *.key
 exclude*
 .env.livai
+
+# ProjSR-specific safety net (appended; do not remove upstream patterns above)
+# Prevent accidental commits of experiment data if DSO is exercised in-place.
+*.parquet
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.feather
+*.csv
+*.pdf
+*.xlsx
+*.xls
+*.dta
+*.zip
+*.7z
+*.tar
+results/
+data/
+models/
+knowledge/
