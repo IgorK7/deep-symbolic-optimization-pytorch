@@ -492,10 +492,13 @@ class StatsLogger:
             Program.cache.values()
         )  # All unique Programs found during training
         # Under CV, rank by the running mean of per-step rewards accumulated
-        # by the Trainer across steps where the program was sampled. Programs
-        # sampled only once fall back to their single r (see r_cv_mean).
+        # on the task across all steps where the program was sampled. The
+        # task's accumulator is keyed by p.str so it survives the pool's
+        # pickle-and-replace round-trip. Programs never re-sampled fall
+        # back to their final single-step r.
         if getattr(Program.task, "cv_active", False):
-            r = [p.r_cv_mean for p in programs]
+            task = Program.task
+            r = [task.r_cv_mean_for(p.str, p.r) for p in programs]
         else:
             r = [p.r for p in programs]
         i_hof = np.argsort(r)[-self.hof :][::-1]  # Indices of top hof Programs

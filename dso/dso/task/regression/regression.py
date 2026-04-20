@@ -254,6 +254,12 @@ class RegressionTask(HierarchicalTask):
             self._X_reward = self.X_train
             self._y_reward = self.y_train
 
+        # CV running-mean accumulator lives here (not on Program) so it
+        # survives the pool's pickle-and-replace round-trip when workers
+        # return fresh Program instances each iteration. Keyed by p.str;
+        # each entry holds (sum_of_rewards, count). Read by HOF ranking.
+        self._cv_accumulator = {}
+
     @property
     def cv_mode(self):
         return self._cv_mode
@@ -290,6 +296,22 @@ class RegressionTask(HierarchicalTask):
             f"set_dgp_fn requires cv.mode='stream', got '{self._cv_mode}'"
         )
         self._dgp_fn = fn
+
+    def record_cv_reward(self, p_str, r):
+        """Accumulate a per-step CV reward for the program identified by
+        p_str (= p.str, the token-sequence byte key). Called by the Trainer
+        after each step's reward computation when cv_active is True."""
+        s, n = self._cv_accumulator.get(p_str, (0.0, 0))
+        self._cv_accumulator[p_str] = (s + float(r), n + 1)
+
+    def r_cv_mean_for(self, p_str, fallback):
+        """Return the running mean of per-step rewards recorded for p_str.
+        Returns the fallback value when no samples have been recorded yet."""
+        entry = self._cv_accumulator.get(p_str)
+        if entry is None:
+            return fallback
+        s, n = entry
+        return s / n if n > 0 else fallback
 
     def refresh_data(self, step):
         """Stream-mode only: draw a fresh (X, y) from the registered DGP and

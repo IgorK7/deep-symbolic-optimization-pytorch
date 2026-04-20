@@ -262,12 +262,6 @@ class Program(object):
         self.off_policy_count = 0 if on_policy else 1
         self.originally_on_policy = on_policy  # Note if a program was created on policy
 
-        # CV-mode reward accumulator: when task.cv_active, the Trainer records
-        # each per-step reward here via record_cv_reward(). r_cv_mean returns
-        # the running mean for HOF ranking. In mode="off" these stay empty.
-        self._r_cv_sum = 0.0
-        self._r_cv_n = 0
-
     def execute(self, X):
         """
         Execute program on input X.
@@ -462,8 +456,10 @@ class Program(object):
         Under task.cv_active, the Trainer invalidates the cached r at the
         start of each training step so the next access recomputes against
         the newly-active fold / fresh DGP draw. The running mean across
-        steps is tracked separately on self._r_cv_sum / self._r_cv_n and
-        exposed as self.r_cv_mean (used for HOF ranking).
+        steps is tracked on RegressionTask._cv_accumulator (keyed by
+        p.str), not on the Program instance -- Program instances can be
+        replaced across iterations by pickled copies returned from the
+        pool, but the task persists in the parent process.
         """
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -473,21 +469,6 @@ class Program(object):
 
             # Return final reward after optimizing
             return self.task.reward_function(self)
-
-    def record_cv_reward(self, r):
-        """Accumulate a per-step CV reward. Called by the Trainer after each
-        step's reward computation when task.cv_active."""
-        self._r_cv_sum += float(r)
-        self._r_cv_n += 1
-
-    @property
-    def r_cv_mean(self):
-        """Running mean of per-step rewards collected under CV mode.
-        Returns self.r when no CV samples have been recorded (falls back
-        to the latest in-step reward)."""
-        if self._r_cv_n == 0:
-            return self.r
-        return self._r_cv_sum / self._r_cv_n
 
     @cached_property
     def complexity(self):

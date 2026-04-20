@@ -18,8 +18,21 @@ from dso.variance import quantile_variance
 
 
 # Work for multiprocessing pool: compute reward
-def work(p):
-    """Compute reward and return it with optimized constants"""
+def work(item):
+    """Compute reward and return it with optimized constants.
+
+    item is either a Program (pool path under cv.mode='off') or a tuple
+    (Program, fold_id) (pool path under cv.mode='rotate'). In rotate mode
+    the worker first sets its local task to the parent-chosen fold so the
+    worker's task-side fit/reward views agree with what the parent is
+    driving this step. The fold_id travels with every work item instead
+    of via shared state so each call is self-contained.
+    """
+    if isinstance(item, tuple):
+        p, fold_id = item
+        Program.task.set_active_fold(fold_id)
+    else:
+        p = item
     r = p.r
     return p
 
@@ -212,14 +225,17 @@ class Trainer:
         self.p_r_best = None
         self.done = False
 
-        # Cross-validated reward mode requires single-process execution because
-        # the active fold / fresh-data view lives on the parent task instance;
-        # pool worker processes hold their own task copies and would not see
-        # per-step fold rotations.
-        if getattr(Program.task, "cv_active", False):
+        # Stream-mode CV requires single-process execution because each step
+        # the parent draws fresh (X, y) from the DGP callable -- there is no
+        # cheap way to broadcast that data to pool worker tasks per step.
+        # Rotate mode does NOT have this restriction: fold indices are
+        # derived from a seed shared at task construction, so each worker's
+        # local task can compute the same folds independently; the fold_id
+        # then rides along with each work unit.
+        if getattr(Program.task, "cv_mode", "off") == "stream":
             assert self.pool is None, (
-                "task.cv.mode != 'off' requires n_cores_batch <= 1 "
-                "(pool workers do not share fold state)."
+                "cv.mode='stream' requires n_cores_batch <= 1 "
+                "(fresh data per step is not broadcast to pool workers)."
             )
 
     def run_one_step(self, override=None):
@@ -317,9 +333,11 @@ class Trainer:
         # every program that will be evaluated this step.
         task = Program.task
         cv_active = getattr(task, "cv_active", False)
+        fold_id = None
         if cv_active:
             if task.cv_mode == "rotate":
-                task.set_active_fold(self.iteration % task.n_folds)
+                fold_id = self.iteration % task.n_folds
+                task.set_active_fold(fold_id)
             elif task.cv_mode == "stream":
                 task.refresh_data(self.iteration)
             for p in programs:
@@ -329,7 +347,13 @@ class Trainer:
         if self.pool is not None:
             # Filter programs that need reward computing
             programs_to_optimize = list({p for p in programs if "r" not in p.__dict__})
-            pool_p_dict = {p.str: p for p in self.pool.map(work, programs_to_optimize)}
+            # Under rotate, each worker needs to match the parent's active
+            # fold before scoring. Ship fold_id with every work item.
+            if fold_id is not None:
+                work_items = [(p, fold_id) for p in programs_to_optimize]
+            else:
+                work_items = programs_to_optimize
+            pool_p_dict = {p.str: p for p in self.pool.map(work, work_items)}
             programs = [
                 pool_p_dict[p.str] if "r" not in p.__dict__ else p for p in programs
             ]
@@ -340,12 +364,18 @@ class Trainer:
         r = np.array([p.r for p in programs])
 
         # CV running-mean accumulator: record this step's per-program reward
-        # into the CV history used for HOF ranking. Dedupe so each unique
-        # program contributes at most one sample per step, regardless of how
-        # many times the RNN sampled it in this batch.
+        # on the task (keyed by p.str). Recording lives on the task, not on
+        # the Program, so state survives pool round-trips where the Program
+        # instance is a fresh pickled copy each iteration. Dedupe so each
+        # unique expression contributes one sample per step regardless of
+        # how many times the RNN sampled it in this batch.
         if cv_active:
-            for p in set(programs):
-                p.record_cv_reward(p.r)
+            seen = set()
+            for p in programs:
+                if p.str in seen:
+                    continue
+                seen.add(p.str)
+                task.record_cv_reward(p.str, p.r)
 
         # Back up programs to save them properly later
         controller_programs = programs.copy() if self.logger.save_token_count else None
