@@ -10,6 +10,7 @@ dso/dso/summary*
 dso/build
 dso/dso/cyfunc.c
 dso/dso/cyfunc*.so
+cyfunc*.pyd
 **/log/
 /tmp
 /demo-web/user
