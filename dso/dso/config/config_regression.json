@@ -44,6 +44,31 @@
       // if decision_tree_threshold_set is an empty list or null.
       "decision_tree_threshold_set" : [],
 
+      // Cross-validated reward. When enabled, the RNN training signal is a
+      // generalization estimate rather than an in-sample fit score.
+      //   mode="off"    : current behavior; full (X_train, y_train) used for
+      //                   both constant optimization and reward (bit-identical
+      //                   to pre-patch DSO).
+      //   mode="rotate" : training data is split into n_folds disjoint folds.
+      //                   Each RNN training step holds out one fold; constants
+      //                   are fit on the remaining k-1 folds; reward is scored
+      //                   on the held-out fold. Active fold rotates across
+      //                   steps. Same DGP, different noise subsamples per step.
+      //   mode="stream" : task holds a DGP callable (set via Python API); each
+      //                   step draws a fresh (X, y) from the DGP. Fit set and
+      //                   reward set are the same fresh sample; noise-invariance
+      //                   comes from resampling across steps (the k->inf limit
+      //                   of rotate). For simulation studies only.
+      // HOF ranking uses a running mean of per-step rewards when mode != "off".
+      // n_cores_batch must be 1 when mode != "off" (pool workers do not share
+      // fold state).
+      "cv" : {
+         "mode" : "off",
+         "n_folds" : 3,
+         "seed" : 42,
+         "stream_batch_size" : null
+      },
+
       // Parameters for optimizing the "poly" token.
       // Note: poly_optimizer is turned on if and only if "poly" is in function_set.
       "poly_optimizer_params" : {

@@ -31,6 +31,7 @@ class RegressionTask(HierarchicalTask):
         protected=False,
         decision_tree_threshold_set=None,
         poly_optimizer_params=None,
+        cv=None,
     ):
         """
         Parameters
@@ -206,13 +207,123 @@ class RegressionTask(HierarchicalTask):
 
             self.poly_optimizer = PolyOptimizer(**poly_optimizer_params)
 
+        """
+        Configure cross-validated reward (optional).
+
+        Three modes:
+          "off"    : fit set and reward set both point at full (X_train, y_train).
+                     Behavior is bit-identical to pre-CV DSO.
+          "rotate" : split training data into n_folds disjoint folds; at each RNN
+                     training step the trainer calls set_active_fold(k), which
+                     updates the fit set (k-1 folds) and reward set (fold k).
+          "stream" : task holds a DGP callable (set via set_dgp_fn); trainer calls
+                     refresh_data() each step, drawing a fresh (X, y). Fit set
+                     and reward set are the same fresh sample each step.
+
+        The metric normalization captured by make_regression_metric above uses
+        full y_train variance and is NOT recomputed per fold. This keeps rewards
+        comparable across folds and across steps.
+        """
+        cv = cv if cv is not None else {}
+        self._cv_mode = cv.get("mode", "off")
+        assert self._cv_mode in ("off", "rotate", "stream"), (
+            f"Unknown cv.mode '{self._cv_mode}'"
+        )
+        self._n_folds = int(cv.get("n_folds", 3))
+        self._cv_seed = int(cv.get("seed", 42))
+        self._stream_batch_size = cv.get("stream_batch_size")
+        self._active_fold = 0
+        self._dgp_fn = None
+
+        if self._cv_mode == "rotate":
+            assert self._n_folds >= 2, "cv.n_folds must be >= 2 for rotate mode."
+            n = len(self.y_train)
+            assert n >= self._n_folds, (
+                f"Training set of size {n} too small for {self._n_folds} folds."
+            )
+            rng = np.random.default_rng(self._cv_seed)
+            perm = rng.permutation(n)
+            self._folds = [np.sort(idx) for idx in np.array_split(perm, self._n_folds)]
+            self.set_active_fold(0)
+        else:
+            # mode == "off" or "stream": views start as the full training arrays.
+            # For stream mode, refresh_data() will replace them on the first step.
+            self._folds = None
+            self._X_fit = self.X_train
+            self._y_fit = self.y_train
+            self._X_reward = self.X_train
+            self._y_reward = self.y_train
+
+    @property
+    def cv_mode(self):
+        return self._cv_mode
+
+    @property
+    def cv_active(self):
+        return self._cv_mode != "off"
+
+    @property
+    def n_folds(self):
+        return self._n_folds
+
+    def set_active_fold(self, k):
+        """Rotate-mode only: make fold k the held-out reward set and the
+        remaining k-1 folds the fit set. Views update in place."""
+        assert self._cv_mode == "rotate", (
+            f"set_active_fold requires cv.mode='rotate', got '{self._cv_mode}'"
+        )
+        k = int(k) % self._n_folds
+        self._active_fold = k
+        reward_idx = self._folds[k]
+        fit_idx = np.concatenate(
+            [self._folds[j] for j in range(self._n_folds) if j != k]
+        )
+        self._X_fit = self.X_train[fit_idx]
+        self._y_fit = self.y_train[fit_idx]
+        self._X_reward = self.X_train[reward_idx]
+        self._y_reward = self.y_train[reward_idx]
+
+    def set_dgp_fn(self, fn):
+        """Stream-mode only: register the DGP callable. Signature: fn(seed:int)
+        returns (X, y) with the same n_features as X_train."""
+        assert self._cv_mode == "stream", (
+            f"set_dgp_fn requires cv.mode='stream', got '{self._cv_mode}'"
+        )
+        self._dgp_fn = fn
+
+    def refresh_data(self, step):
+        """Stream-mode only: draw a fresh (X, y) from the registered DGP and
+        replace both fit and reward views with it. Per-step seed = cv.seed+step
+        for reproducibility."""
+        assert self._cv_mode == "stream", (
+            f"refresh_data requires cv.mode='stream', got '{self._cv_mode}'"
+        )
+        assert self._dgp_fn is not None, (
+            "cv.mode='stream' requires task.set_dgp_fn(...) before training."
+        )
+        X_new, y_new = self._dgp_fn(self._cv_seed + int(step))
+        assert X_new.shape[1] == self.X_train.shape[1], (
+            "DGP callable returned X with wrong number of features."
+        )
+        self._X_fit = X_new
+        self._y_fit = y_new
+        self._X_reward = X_new
+        self._y_reward = y_new
+
     def reward_function(self, p, optimizing=False):
+        # Select the active data view. With cv.mode=="off", fit/reward views
+        # both point at the full (X_train, y_train), so behavior is identical
+        # to pre-patch DSO. With cv.mode in ("rotate", "stream"), fit and
+        # reward views may differ; polynomial fitting always uses the fit set.
+        X_active = self._X_fit if optimizing else self._X_reward
+        y_active = self._y_fit if optimizing else self._y_reward
+
         # fit a polynomial if p contains a 'poly' token
         if p.poly_pos is not None:
             assert (
                 len(p.const_pos) == 0
             ), "A program cannot contain 'poly' and 'const' tokens at the same time"
-            poly_data_y = make_poly_data(p.traversal, self.X_train, self.y_train)
+            poly_data_y = make_poly_data(p.traversal, self._X_fit, self._y_fit)
             if (
                 poly_data_y is None
             ):  # invalid function evaluations (nan or inf) appeared in make_poly_data
@@ -221,11 +332,11 @@ class RegressionTask(HierarchicalTask):
                 )
             else:
                 p.traversal[p.poly_pos] = self.poly_optimizer.fit(
-                    self.X_train, poly_data_y
+                    self._X_fit, poly_data_y
                 )
 
         # Compute estimated values
-        y_hat = p.execute(self.X_train)
+        y_hat = p.execute(X_active)
 
         # For invalid expressions, return invalid_reward
         if p.invalid:
@@ -242,10 +353,10 @@ class RegressionTask(HierarchicalTask):
 
         # Compute and return neg_nrmse for constant optimization
         if optimizing:
-            return self.const_opt_metric(self.y_train, y_hat)
+            return self.const_opt_metric(y_active, y_hat)
 
         # Compute metric
-        r = self.metric(self.y_train, y_hat)
+        r = self.metric(y_active, y_hat)
 
         # Direct reward noise
         # For reward_noise_type == "r", success can for ~max_reward metrics be

@@ -491,7 +491,13 @@ class StatsLogger:
         programs = list(
             Program.cache.values()
         )  # All unique Programs found during training
-        r = [p.r for p in programs]
+        # Under CV, rank by the running mean of per-step rewards accumulated
+        # by the Trainer across steps where the program was sampled. Programs
+        # sampled only once fall back to their single r (see r_cv_mean).
+        if getattr(Program.task, "cv_active", False):
+            r = [p.r_cv_mean for p in programs]
+        else:
+            r = [p.r for p in programs]
         i_hof = np.argsort(r)[-self.hof :][::-1]  # Indices of top hof Programs
         hof = [programs[i] for i in i_hof]
 

@@ -212,6 +212,16 @@ class Trainer:
         self.p_r_best = None
         self.done = False
 
+        # Cross-validated reward mode requires single-process execution because
+        # the active fold / fresh-data view lives on the parent task instance;
+        # pool worker processes hold their own task copies and would not see
+        # per-step fold rotations.
+        if getattr(Program.task, "cv_active", False):
+            assert self.pool is None, (
+                "task.cv.mode != 'off' requires n_cores_batch <= 1 "
+                "(pool workers do not share fold state)."
+            )
+
     def run_one_step(self, override=None):
         """
         Executes one step of main training loop. If override is given,
@@ -300,6 +310,21 @@ class Trainer:
             obs = np.append(obs, deap_obs, axis=0)
             priors = np.append(priors, deap_priors, axis=0)
 
+        # CV scheduler: before this step's reward computation, rotate the
+        # active fold (or draw fresh data from the DGP) and invalidate any
+        # cached r on batch programs so each gets rescored on the new data
+        # view. Placed after RNN sampling and GP augmentation so it covers
+        # every program that will be evaluated this step.
+        task = Program.task
+        cv_active = getattr(task, "cv_active", False)
+        if cv_active:
+            if task.cv_mode == "rotate":
+                task.set_active_fold(self.iteration % task.n_folds)
+            elif task.cv_mode == "stream":
+                task.refresh_data(self.iteration)
+            for p in programs:
+                p.__dict__.pop("r", None)
+
         # Compute rewards in parallel
         if self.pool is not None:
             # Filter programs that need reward computing
@@ -313,6 +338,14 @@ class Trainer:
 
         # Compute rewards (or retrieve cached rewards)
         r = np.array([p.r for p in programs])
+
+        # CV running-mean accumulator: record this step's per-program reward
+        # into the CV history used for HOF ranking. Dedupe so each unique
+        # program contributes at most one sample per step, regardless of how
+        # many times the RNN sampled it in this batch.
+        if cv_active:
+            for p in set(programs):
+                p.record_cv_reward(p.r)
 
         # Back up programs to save them properly later
         controller_programs = programs.copy() if self.logger.save_token_count else None
