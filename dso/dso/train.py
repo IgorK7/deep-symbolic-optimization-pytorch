@@ -336,7 +336,11 @@ class Trainer:
         fold_id = None
         if cv_active:
             if task.cv_mode == "rotate":
-                fold_id = self.iteration % task.n_folds
+                # Bootstrap rotation: the step index itself seeds the random
+                # subsample in task.set_active_fold(step), so each iteration
+                # sees a different subsample (rather than cycling through k
+                # fixed fold-complements).
+                fold_id = self.iteration
                 task.set_active_fold(fold_id)
             elif task.cv_mode == "stream":
                 task.refresh_data(self.iteration)

@@ -49,19 +49,23 @@
       //   mode="off"    : current behavior; full (X_train, y_train) used for
       //                   both constant optimization and reward (bit-identical
       //                   to pre-patch DSO).
-      //   mode="rotate" : training data is split into n_folds disjoint folds.
-      //                   Each RNN training step holds out one fold; constants
-      //                   are fit on the remaining k-1 folds; reward is scored
-      //                   on the held-out fold. Active fold rotates across
-      //                   steps. Same DGP, different noise subsamples per step.
+      //   mode="rotate" : bootstrap rotation. Each RNN step draws a fresh
+      //                   random subsample of size n*(n_folds-1)/n_folds
+      //                   without replacement from the training rows (seeded
+      //                   by cv.seed + step). BFGS and reward both use that
+      //                   subsample; the complementary rows are unused for
+      //                   that step. Across iterations the RNN sees many
+      //                   different subsamples so overfitting to features
+      //                   common to a small set of folds is discouraged.
       //   mode="stream" : task holds a DGP callable (set via Python API); each
       //                   step draws a fresh (X, y) from the DGP. Fit set and
       //                   reward set are the same fresh sample; noise-invariance
-      //                   comes from resampling across steps (the k->inf limit
-      //                   of rotate). For simulation studies only.
+      //                   comes from resampling across steps (the infinite-data
+      //                   limit of rotate). For simulation studies only.
       // HOF ranking uses a running mean of per-step rewards when mode != "off".
-      // n_cores_batch must be 1 when mode != "off" (pool workers do not share
-      // fold state).
+      // n_cores_batch must be 1 when mode="stream" (pool workers do not share
+      // fresh-data state); rotate supports multi-core since the subsample is
+      // deterministic from (cv.seed, step).
       "cv" : {
          "mode" : "off",
          "n_folds" : 3,

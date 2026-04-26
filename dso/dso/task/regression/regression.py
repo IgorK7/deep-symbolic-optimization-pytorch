@@ -236,14 +236,26 @@ class RegressionTask(HierarchicalTask):
         self._dgp_fn = None
 
         if self._cv_mode == "rotate":
+            # Bootstrap-rotation semantics (Option A): each RNN training step
+            # draws a fresh random subsample of size
+            #   subsample_size = n * (n_folds - 1) / n_folds
+            # from the full training set (without replacement), seeded by
+            # cv.seed + step. Both BFGS (fit) and the reward use that same
+            # subsample; the complementary rows are simply unused for that
+            # step. Across iterations the RNN sees many different subsamples
+            # rather than cycling through k fixed fold-complements, so memo-
+            # rizing noise features common to a small set of folds does not
+            # pay off. n_folds is retained as the config knob controlling
+            # subsample size (e.g. n_folds=3 -> 2/3 of training rows).
             assert self._n_folds >= 2, "cv.n_folds must be >= 2 for rotate mode."
             n = len(self.y_train)
             assert n >= self._n_folds, (
                 f"Training set of size {n} too small for {self._n_folds} folds."
             )
-            rng = np.random.default_rng(self._cv_seed)
-            perm = rng.permutation(n)
-            self._folds = [np.sort(idx) for idx in np.array_split(perm, self._n_folds)]
+            self._n_train = n
+            self._subsample_size = (n * (self._n_folds - 1)) // self._n_folds
+            # Folds are no longer pre-computed; left as None for clarity.
+            self._folds = None
             self.set_active_fold(0)
         else:
             # mode == "off" or "stream": views start as the full training arrays.
@@ -272,22 +284,33 @@ class RegressionTask(HierarchicalTask):
     def n_folds(self):
         return self._n_folds
 
-    def set_active_fold(self, k):
-        """Rotate-mode only: make fold k the held-out reward set and the
-        remaining k-1 folds the fit set. Views update in place."""
+    def set_active_fold(self, step):
+        """Rotate-mode only: draw a fresh random subsample of the training
+        rows (without replacement) and point both fit and reward views at
+        it. The subsample is deterministic given (cv.seed, step), so the
+        parent process and pool workers compute the same subsample when
+        they receive the same step id.
+
+        Bootstrap-rotation semantics (Option A): the argument is the RNN
+        iteration index, not a fold index. The complementary rows are
+        unused this step, not held out for scoring.
+        """
         assert self._cv_mode == "rotate", (
             f"set_active_fold requires cv.mode='rotate', got '{self._cv_mode}'"
         )
-        k = int(k) % self._n_folds
-        self._active_fold = k
-        reward_idx = self._folds[k]
-        fit_idx = np.concatenate(
-            [self._folds[j] for j in range(self._n_folds) if j != k]
-        )
-        self._X_fit = self.X_train[fit_idx]
-        self._y_fit = self.y_train[fit_idx]
-        self._X_reward = self.X_train[reward_idx]
-        self._y_reward = self.y_train[reward_idx]
+        step = int(step)
+        self._active_fold = step
+        rng = np.random.default_rng(self._cv_seed + step)
+        idx = rng.choice(self._n_train, size=self._subsample_size, replace=False)
+        idx = np.sort(idx)
+        self._X_fit = self.X_train[idx]
+        self._y_fit = self.y_train[idx]
+        # Fit set and reward set are the same subsample: BFGS fits constants
+        # on this 2/3 sample and the policy-gradient reward is scored on the
+        # same 2/3. Across iterations the RNN sees a different subsample
+        # each step.
+        self._X_reward = self._X_fit
+        self._y_reward = self._y_fit
 
     def set_dgp_fn(self, fn):
         """Stream-mode only: register the DGP callable. Signature: fn(seed:int)
