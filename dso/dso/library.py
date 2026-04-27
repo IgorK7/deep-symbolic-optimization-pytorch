@@ -53,6 +53,68 @@ class Token:
     def __repr__(self):
         return self.name
 
+    def __reduce__(self):
+        # Pickle Tokens by name, not by callable reference. The callable
+        # held in self.function may have a __module__ that breaks pickle's
+        # global-lookup path under multiprocessing workers (e.g., when the
+        # parent imports via a manipulated sys.path or via "python -m"
+        # invocation that lands functions in __main__). On unpickle we
+        # rebuild the callable from dso.functions.function_map, which is
+        # built deterministically at import time and is identical across
+        # parent and worker processes.
+        if self.input_var is not None:
+            # Input variable Tokens carry no callable; reconstruct via __init__.
+            return (
+                Token,
+                (None, self.name, self.arity, self.complexity, self.input_var),
+            )
+
+        # The Token's `name` attribute is the bare op name (e.g. "sqrt") for
+        # both unprotected and protected variants. function_map distinguishes
+        # them via the "protected_" prefix on the key. Detect which variant
+        # this Token wraps by identity check against function_map's protected
+        # entry (if it exists).
+        from dso.functions import function_map  # local: avoid circular import
+        is_protected = False
+        protected_canonical = function_map.get("protected_{}".format(self.name))
+        if (
+            protected_canonical is not None
+            and self.function is protected_canonical.function
+        ):
+            is_protected = True
+
+        return (
+            _rebuild_token_by_name,
+            (self.name, self.arity, self.complexity, is_protected),
+        )
+
+
+def _rebuild_token_by_name(name, arity, complexity, is_protected=False):
+    """Reconstruct a Token by looking up its callable in function_map.
+
+    Used by Token.__reduce__ to make Tokens picklable across multiprocessing
+    workers regardless of how the original callable's __module__ resolves.
+    """
+    # Local import to avoid a circular import at module-load time.
+    from dso.functions import function_map
+
+    if is_protected:
+        canonical = function_map.get("protected_{}".format(name))
+        if canonical is None:
+            # Asked for protected but only unprotected is registered; fall
+            # back rather than fail. (Should not normally happen.)
+            canonical = function_map.get(name)
+    else:
+        canonical = function_map.get(name) or function_map.get(
+            "protected_{}".format(name)
+        )
+    if canonical is None:
+        raise ValueError(
+            "Token {!r} not found in dso.functions.function_map during "
+            "unpickle (worker may be missing a custom op import).".format(name)
+        )
+    return Token(canonical.function, name, arity, complexity)
+
 
 class HardCodedConstant(Token):
     """
@@ -77,6 +139,11 @@ class HardCodedConstant(Token):
 
     def function(self):
         return self.value
+
+    def __reduce__(self):
+        # Reconstruct via __init__ so self.function is correctly re-bound
+        # to this instance (it is a bound method, not a global callable).
+        return (self.__class__, (float(self.value[0]), self.name))
 
 
 class PlaceholderConstant(Token):
@@ -105,6 +172,14 @@ class PlaceholderConstant(Token):
             return self.name
         return str(self.value[0])
 
+    def __reduce__(self):
+        # Reconstruct via __init__ so self.function is correctly re-bound.
+        # value may be None (placeholder, pre-BFGS) or a 1-d ndarray
+        # (post-BFGS); pass a Python scalar for the latter.
+        if self.value is None:
+            return (self.__class__, ())
+        return (self.__class__, (float(self.value[0]),))
+
 
 class Polynomial(Token):
     """
@@ -125,6 +200,10 @@ class Polynomial(Token):
         self.coef = coef
         complexity = 1 if coef is None else len(coef)
         super().__init__(self.eval_poly, "poly", arity=0, complexity=complexity)
+
+    def __reduce__(self):
+        # Reconstruct via __init__ so self.function is correctly re-bound.
+        return (self.__class__, (self.exponents, self.coef))
 
     @staticmethod
     def eval_monomials(X, monomials_exponents):
@@ -242,6 +321,12 @@ class StateChecker(Token):
             np.less(self.state_value, self.threshold), value_if_true, value_if_false
         )
 
+    def __reduce__(self):
+        # Reconstruct via __init__ so self.function is correctly re-bound.
+        # state_value is transient (set per-evaluation) and intentionally
+        # not preserved.
+        return (self.__class__, (self.state_index, self.threshold))
+
 
 class DiscreteAction(HardCodedConstant):
     """
@@ -253,6 +338,12 @@ class DiscreteAction(HardCodedConstant):
     def __init__(self, value):
         assert isinstance(value, int) and value >= 0
         super().__init__(value, "a_{}".format(value + 1))
+
+    def __reduce__(self):
+        # DiscreteAction.__init__ takes only the integer value; the name is
+        # derived from it. Override the parent's __reduce__ which would
+        # otherwise pass (value, name) to __init__.
+        return (self.__class__, (int(self.value[0]),))
 
 
 class MultiDiscreteAction(Token):
