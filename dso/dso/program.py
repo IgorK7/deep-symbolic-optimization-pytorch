@@ -12,6 +12,56 @@ from dso.utils import cached_property
 import dso.utils as U
 
 
+# ---------------------------------------------------------------------------
+# Wall-clock guard around SymPy parsing.
+#
+# `sympy_expr` is documented as being for pretty-printing only, but it is also
+# called by train_stats.hof_work() for every Hall-of-Fame entry when a run
+# finishes. On expressions carrying extreme-magnitude float constants,
+# SymPy's Mul.flatten -> numbers.gcd -> construct_domain -> RealField/mpmath
+# path can run effectively unbounded: observed >900 s on a single expression,
+# which hangs the whole fit *after* the search has completed successfully.
+# Because hof_work runs under multiprocessing.Pool.map, the parent then blocks
+# forever in pool.get() with no error and no diagnostics.
+#
+# The guard makes that case fall back to the plain serialized tree, which is
+# exactly what the pre-existing `except Exception` branch already returns and
+# is still a parseable expression string for downstream consumers.
+#
+# POSIX only (needs SIGALRM); a no-op elsewhere and in non-main threads.
+# Tune or disable with DSO_SYMPY_PARSE_TIMEOUT (seconds, 0 = unlimited).
+# ---------------------------------------------------------------------------
+import signal as _signal
+
+_SYMPY_PARSE_TIMEOUT = float(os.environ.get("DSO_SYMPY_PARSE_TIMEOUT", "30"))
+
+
+class _SympyParseTimeout(Exception):
+    pass
+
+
+def _parse_expr_guarded(s, seconds=None):
+    """U.parse_expr with a wall-clock ceiling; raises _SympyParseTimeout."""
+    if seconds is None:
+        seconds = _SYMPY_PARSE_TIMEOUT
+    if seconds <= 0 or not hasattr(_signal, "SIGALRM"):
+        return U.parse_expr(s)
+
+    def _on_alarm(signum, frame):
+        raise _SympyParseTimeout(f"parse_expr exceeded {seconds}s")
+
+    try:
+        previous = _signal.signal(_signal.SIGALRM, _on_alarm)
+    except (ValueError, OSError):
+        return U.parse_expr(s)      # not the main thread -> run unguarded
+    try:
+        _signal.setitimer(_signal.ITIMER_REAL, seconds)
+        return U.parse_expr(s)
+    finally:
+        _signal.setitimer(_signal.ITIMER_REAL, 0)
+        _signal.signal(_signal.SIGALRM, previous)
+
+
 def _finish_tokens(tokens):
     """
     Complete a possibly unfinished string of tokens.
@@ -506,7 +556,7 @@ class Program(object):
         tree = build_tree(tree)
         tree = convert_to_sympy(tree)
         try:
-            expr = U.parse_expr(tree.__repr__())  # SymPy expression
+            expr = _parse_expr_guarded(tree.__repr__())  # SymPy expression
         except Exception:
             expr = tree.__repr__()
         return expr
